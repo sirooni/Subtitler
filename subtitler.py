@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import winsound
 import subprocess
 import whisperx
 from sudachipy import tokenizer
@@ -15,7 +16,7 @@ min_chars = 5  # 1字幕の最低文字数
 max_chars = 20  # 1字幕の最大文字数
 min_duration = 1.0  # 最低表示時間(秒)
 gap_threshold = 0.25  # セリフ切れ目の閾値(秒)
-long_token_threshold = 0.75  # 文節の閾値(秒)
+long_token_threshold = 0.1  # 文節の閾値(秒)
 
 # Sudachi設定
 sudachi_tokenizer = dictionary.Dictionary().create()
@@ -218,12 +219,15 @@ def main():
         sys.exit(1)
 
     video_path = sys.argv[1]
+
     base = os.path.splitext(os.path.basename(video_path))[0]
-    audio_path = base + ".wav"
-    srt_path = base + ".srt"
-    seg_json = base + "_segments.json"
-    aligned_json = base + "_aligned.json"
-    token_json = base + "_tokens.json"
+    outputs_dir = os.path.join("outputs", base)
+    os.makedirs(outputs_dir, exist_ok=True)
+    audio_path = os.path.join(outputs_dir, "audio.wav")
+    srt_path = os.path.join(outputs_dir, f"{base}.srt")
+    seg_json = os.path.join(outputs_dir, "segments.json")
+    aligned_json = os.path.join(outputs_dir, "aligned.json")
+    token_json = os.path.join(outputs_dir, "tokens.json")
 
     skip_transcribe = "--skip-transcribe" in sys.argv
     skip_align = "--skip-align" in sys.argv
@@ -231,6 +235,7 @@ def main():
 
     print("[1/5] Extracting audio...")
     extract_audio(video_path, audio_path)
+    winsound.Beep(1000, 200)
 
     if skip_transcribe and os.path.exists(seg_json):
         print("[2/5] Skipping transcription, loading segments.json...")
@@ -242,6 +247,7 @@ def main():
         segments = result["segments"]
         with open(seg_json, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
+    winsound.Beep(1000, 200)
 
     if skip_align and os.path.exists(aligned_json):
         print("[3/5] Skipping alignment, loading aligned.json...")
@@ -252,6 +258,7 @@ def main():
         aligned_result = align_segments(audio_path, segments)
         with open(aligned_json, "w", encoding="utf-8") as f:
             json.dump(aligned_result, f, ensure_ascii=False, indent=2)
+    winsound.Beep(1000, 200)
 
     if skip_tokenize and os.path.exists(token_json):
         print("[4/5] Skipping tokenization, loading tokens.json...")
@@ -260,12 +267,14 @@ def main():
     else:
         print("[4/5] Tokenizing with Sudachi B-mode...")
         tokens = tokenize_japanese(aligned_result["segments"], save_json=token_json)
+    winsound.Beep(1000, 200)
 
     print(f"[5/5] Formatting and writing SRT to {srt_path} ...")
     srt_lines = format_srt_with_tokens(
         tokens, min_chars, max_chars, min_duration, gap_threshold, long_token_threshold
     )
     write_srt(srt_lines, srt_path)
+    winsound.Beep(1000, 200)
 
     print("Done.")
 
