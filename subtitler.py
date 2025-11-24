@@ -7,6 +7,9 @@ import whisperx
 from sudachipy import tokenizer
 from sudachipy import dictionary
 
+import xml.etree.ElementTree as ET
+from fractions import Fraction
+
 # ===== 設定 =====
 language = "ja"
 whisperx_model = "large-v3"
@@ -38,6 +41,53 @@ def extract_audio(video_path, audio_path):
         audio_path,
     ]
     subprocess.run(cmd, check=True)
+
+
+# ===== 動画情報取得 =====
+def get_video_info(video_path):
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=r_frame_rate,duration,width,height",
+        "-of",
+        "json",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=True, encoding="utf-8"
+        )
+        info = json.loads(result.stdout)
+        stream = info["streams"][0]
+        r_frame_rate = stream["r_frame_rate"]
+        num, den = map(int, r_frame_rate.split("/"))
+        fps = num / den
+        duration = float(stream.get("duration", 0))
+        width = int(stream.get("width", 1920))
+        height = int(stream.get("height", 1080))
+        return {
+            "fps": fps,
+            "frame_duration_num": den,
+            "frame_duration_den": num,
+            "duration_sec": duration,
+            "width": width,
+            "height": height,
+        }
+    except Exception as e:
+        print(f"Warning: Could not get video info via ffprobe: {e}")
+        # Default to 30fps 1080p
+        return {
+            "fps": 30.0,
+            "frame_duration_num": 1001,
+            "frame_duration_den": 30000,
+            "duration_sec": 3600.0,
+            "width": 1920,
+            "height": 1080,
+        }
 
 
 # ===== WhisperXで文字起こし =====
@@ -210,6 +260,112 @@ def write_srt(srt_lines, srt_path):
             f.write(f"{line['text']}\n\n")
 
 
+# ===== FCPXML書き込み =====
+def write_fcpxml(srt_lines, fcpxml_path, video_info):
+    fps = video_info["fps"]
+    frame_duration_num = video_info["frame_duration_num"]
+    frame_duration_den = video_info["frame_duration_den"]
+    width = video_info["width"]
+    height = video_info["height"]
+    duration_sec = video_info["duration_sec"]
+
+    frame_duration_str = f"{frame_duration_num}/{frame_duration_den}s"
+    total_frames = int(duration_sec * fps)
+    total_duration_str = f"{total_frames * frame_duration_num}/{frame_duration_den}s"
+
+    fcpxml = ET.Element("fcpxml", version="1.9")
+    resources = ET.SubElement(fcpxml, "resources")
+    format_elem = ET.SubElement(
+        resources,
+        "format",
+        id="r1",
+        name=f"FFVideoFormat{width}x{height}p{fps}",
+        frameDuration=frame_duration_str,
+        width=str(width),
+        height=str(height),
+    )
+    effect_elem = ET.SubElement(
+        resources,
+        "effect",
+        id="r2",
+        name="Basic Title",
+        uid=".../Titles.localized/Bumper: Opener.localized/Basic Title.localized/Basic Title.moti",
+    )
+
+    library = ET.SubElement(fcpxml, "library")
+    event = ET.SubElement(library, "event", name="Subtitles")
+    project = ET.SubElement(event, "project", name="Subtitle Project")
+    sequence = ET.SubElement(
+        project,
+        "sequence",
+        format="r1",
+        duration=total_duration_str,
+        tcStart="0s",
+        tcFormat="NDF",
+    )
+    spine = ET.SubElement(sequence, "spine")
+
+    # Base gap to hold titles
+    base_gap = ET.SubElement(
+        spine,
+        "gap",
+        name="Gap",
+        offset="0s",
+        duration=total_duration_str,
+        start="0s",
+    )
+
+    # Add titles
+    for i, line in enumerate(srt_lines):
+        start_sec = line["start"]
+        end_sec = line["end"]
+        text = line["text"]
+
+        # Calculate frames
+        start_frame = int(start_sec * fps)
+        end_frame = int(end_sec * fps)
+        duration_frame = end_frame - start_frame
+
+        start_str = f"{start_frame * frame_duration_num}/{frame_duration_den}s"
+        duration_str = f"{duration_frame * frame_duration_num}/{frame_duration_den}s"
+        offset_str = start_str  # Offset relative to the parent gap (which starts at 0)
+
+        title = ET.SubElement(
+            base_gap,
+            "title",
+            name=f"Subtitle {i+1}",
+            lane="1",
+            offset=offset_str,
+            ref="r2",
+            duration=duration_str,
+            start=start_str,
+        )
+        
+        # Param for text content (standard Text+ / Basic Title structure)
+        # Note: The exact structure for "Text+" vs "Basic Title" can vary.
+        # "Basic Title" is safer for general compatibility.
+        # To make it "Text+", we might need a different effect UID, but Basic Title is usually editable.
+        
+        text_elem = ET.SubElement(title, "text")
+        text_style = ET.SubElement(text_elem, "text-style", ref=f"ts{i+1}")
+        text_style.text = text
+
+        text_style_def = ET.SubElement(title, "text-style-def", id=f"ts{i+1}")
+        text_style_val = ET.SubElement(
+            text_style_def,
+            "text-style",
+            font="Hiragino Kaku Gothic ProN",
+            fontSize="50",
+            fontFace="W3",
+            fontColor="1 1 1 1",
+            alignment="center",
+        )
+
+    tree = ET.ElementTree(fcpxml)
+    ET.indent(tree, space="  ", level=0)
+    tree.write(fcpxml_path, encoding="utf-8", xml_declaration=True)
+
+
 # ===== メイン処理 =====
 def main():
     if len(sys.argv) < 2:
@@ -225,6 +381,7 @@ def main():
     os.makedirs(outputs_dir, exist_ok=True)
     audio_path = os.path.join(outputs_dir, "audio.wav")
     srt_path = os.path.join(outputs_dir, f"{base}.srt")
+    fcpxml_path = os.path.join(outputs_dir, f"{base}.fcpxml")
     seg_json = os.path.join(outputs_dir, "segments.json")
     aligned_json = os.path.join(outputs_dir, "aligned.json")
     token_json = os.path.join(outputs_dir, "tokens.json")
@@ -232,6 +389,11 @@ def main():
     skip_transcribe = "--skip-transcribe" in sys.argv
     skip_align = "--skip-align" in sys.argv
     skip_tokenize = "--skip-tokenize" in sys.argv
+
+    # 動画情報取得
+    print("[0/5] Getting video info...")
+    video_info = get_video_info(video_path)
+    print(f"      FPS: {video_info['fps']}, Size: {video_info['width']}x{video_info['height']}")
 
     print("[1/5] Extracting audio...")
     extract_audio(video_path, audio_path)
@@ -274,6 +436,10 @@ def main():
         tokens, min_chars, max_chars, min_duration, gap_threshold, long_token_threshold
     )
     write_srt(srt_lines, srt_path)
+    
+    print(f"      Writing FCPXML to {fcpxml_path} ...")
+    write_fcpxml(srt_lines, fcpxml_path, video_info)
+    
     winsound.Beep(1000, 200)
 
     print("Done.")
