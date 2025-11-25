@@ -1,3 +1,4 @@
-whisperx
+whisperx==3.1.1
+faster-whisper==0.10.0
 sudachipy
 sudachidict_core
