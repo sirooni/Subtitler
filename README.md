@@ -36,6 +36,8 @@ python subtitler.py <動画ファイルパス> [オプション]
 - `--skip-transcribe`: 文字起こしをスキップし、既存の `segments.json` を使用します。
 - `--skip-align`: アラインメントをスキップし、既存の `aligned.json` を使用します。
 - `--skip-tokenize`: 形態素解析をスキップし、既存の `tokens.json` を使用します。
+- `--import-srt`: SRT生成（文字起こし〜SRT書き出し）をスキップし、既存のSRTファイルを読み込みます。
+- `--srt-path <path>`: インポートするSRTファイルのパスを指定します（`--import-srt` と併用）。省略時はデフォルトの出力パスを使用します。
 
 ### 出力
 
