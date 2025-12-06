@@ -238,9 +238,9 @@ def format_srt_with_tokens(
     tokens,
     min_chars=5,
     max_chars=20,
-    min_duration=2.0,
-    gap_threshold=0.5,
-    long_token_threshold=0.2,
+    min_duration=1.0,
+    gap_threshold=0.5,  # Increased default
+    long_token_threshold=0.5, # Increased default
 ):
     srt_lines = []
     idx = 1
@@ -248,7 +248,7 @@ def format_srt_with_tokens(
     current_start = None
     current_end = None
 
-    for token in tokens:
+    for i, token in enumerate(tokens):
         text = token["surface"]
         start = token["start"]
         end = token["end"]
@@ -257,55 +257,66 @@ def format_srt_with_tokens(
         if start is None or end is None:
             continue
 
-        # 新しいブロックを開始する条件
+        # 初期化
+        if current_start is None:
+            current_start = start
+            current_end = end
+            current_text = text
+            continue
+
+        # ギャップの計算
+        gap = start - current_end
+        
+        # 現在の字幕の長さ
+        current_len = len(current_text)
+        
+        # 次のトークンを追加したときの長さ
+        next_len = current_len + len(text)
+
+        # 分割判定フラグ
         should_split = False
-        if current_text and (start - current_end > gap_threshold):
+        
+        # 1. ギャップによる分割
+        # ギャップが大きく、かつ現在のテキストがある程度長い、またはギャップが非常に大きい場合
+        if gap > gap_threshold:
+             if current_len >= min_chars or gap > 1.0:
+                 should_split = True
+        
+        # 2. 文字数制限による分割
+        # 最大文字数を超える場合
+        if next_len > max_chars:
             should_split = True
-        if len(current_text) + len(text) > max_chars:
-            should_split = True
+            
+        # 3. 文末判定（句読点）
+        # 句読点で終わる場合、かつ最低文字数を満たしている場合
+        if current_text[-1] in "。、！？!?" and current_len >= min_chars:
+             should_split = True
+
+        # 4. 強制結合（例外）
+        # 分割しようとしているが、現在のテキストが極端に短い場合は、ギャップが許容範囲内なら結合を試みる
+        if should_split and current_len < min_chars and gap < 1.0 and next_len <= max_chars:
+             should_split = False
 
         if should_split:
-            # 既存の字幕ブロックを追加
-            if current_text:
-                duration = max(current_end - current_start, min_duration)
-                srt_lines.append(
-                    {
-                        "index": idx,
-                        "start": current_start,
-                        "end": current_start + duration,
-                        "text": current_text.strip(),
-                    }
-                )
-                idx += 1
+            # 現在のブロックを確定
+            duration = max(current_end - current_start, min_duration)
+            srt_lines.append(
+                {
+                    "index": idx,
+                    "start": current_start,
+                    "end": current_start + duration,
+                    "text": current_text.strip(),
+                }
+            )
+            idx += 1
+            
             # 新しいブロック開始
             current_text = text
             current_start = start
             current_end = end
         else:
-            if not current_text:
-                current_start = start
+            # 結合
             current_text += text
-            current_end = end
-
-        is_phrase_finished = (
-            end - start
-        ) >= long_token_threshold or text in "。、！？!?"
-        over_min_chars = len(current_text) >= min_chars
-        if is_phrase_finished and over_min_chars:
-            if current_text:
-                duration = max(current_end - current_start, min_duration)
-                srt_lines.append(
-                    {
-                        "index": idx,
-                        "start": current_start,
-                        "end": current_start + duration,
-                        "text": current_text.strip(),
-                    }
-                )
-                idx += 1
-            # 新しいブロック開始
-            current_text = ""
-            current_start = start
             current_end = end
 
     # 最後のブロックを追加
