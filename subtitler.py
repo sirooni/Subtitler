@@ -3,7 +3,7 @@ import sys
 import json
 import winsound
 import subprocess
-import whisperx
+import stable_whisper
 from sudachipy import tokenizer
 from sudachipy import dictionary
 
@@ -49,8 +49,6 @@ def get_video_info(video_path):
         "ffprobe",
         "-v",
         "error",
-        "-select_streams",
-        "v:0",
         "-show_entries",
         "stream=r_frame_rate,duration,width,height",
         "-of",
@@ -63,9 +61,18 @@ def get_video_info(video_path):
         )
         info = json.loads(result.stdout)
         stream = info["streams"][0]
-        r_frame_rate = stream["r_frame_rate"]
-        num, den = map(int, r_frame_rate.split("/"))
-        fps = num / den
+        r_frame_rate = stream.get("r_frame_rate", "30000/1001")
+        try:
+            num, den = map(int, r_frame_rate.split("/"))
+            if den == 0:
+                fps = 30.0
+                num, den = 30000, 1001
+            else:
+                fps = num / den
+        except ValueError:
+            fps = 30.0
+            num, den = 30000, 1001
+
         duration = float(stream.get("duration", 0))
         width = int(stream.get("width", 1920))
         height = int(stream.get("height", 1080))
@@ -90,50 +97,60 @@ def get_video_info(video_path):
         }
 
 
-# ===== WhisperXで文字起こし =====
-def transcribe_whisperx(audio_path):
-    audio = whisperx.load_audio(audio_path)
-    model = whisperx.load_model(whisperx_model, device, compute_type=compute_type)
-    result = model.transcribe(audio, language=language)
+# ===== WhisperXで文字起こし (Deprecated) -> Stable Whisper =====
+def transcribe_stable_whisper(audio_path):
+    # Load model (stable-whisper wraps the original whisper model)
+    model = stable_whisper.load_model(whisperx_model, device=device)
+    
+    # Transcribe with word timestamps
+    # stable-ts returns a result object that has .to_dict() or can be accessed directly
+    result = model.transcribe(audio_path, language=language)
+    
+    # result is a WhisperResult object, we can convert it to dict for compatibility or use it directly.
+    # For consistency with previous code structure, let's return the object but we might need to adjust usage.
     return result
 
-
-# ===== アラインメント =====
-def align_segments(audio_path, segments):
-    align_model, metadata = whisperx.load_align_model(
-        language_code=language, device=device
-    )
-    aligned_result = whisperx.align(
-        segments, align_model, metadata, audio_path, device=device
-    )
-    return aligned_result
+# ===== アラインメント (Removed) =====
+# stable-whisper does alignment during transcription.
 
 
 # ===== Sudachiで日本語分割 =====
-def tokenize_japanese(aligned_segments, save_json=None):
+def tokenize_japanese(whisper_result, save_json=None):
     tokens = []
     
     # 全ての文字とタイムスタンプのペアリストを作成
     chars = []
-    for seg in aligned_segments:
-        if "words" not in seg:
-            continue
-        for w in seg["words"]:
-            if "word" not in w:
-                continue
-            word_text = w["word"]
+    
+    # stable_whisper result structure handling
+    # result.all_words() returns a list of objects with word, start, end, etc.
+    # If passing a dict (from JSON load), we need to handle it differently.
+    
+    all_words = []
+    if hasattr(whisper_result, "all_words"):
+        all_words = whisper_result.all_words()
+    elif isinstance(whisper_result, dict):
+        # If loaded from JSON, we might need to reconstruct or iterate segments manually
+        # stable-ts JSON format usually has segments -> words
+        if "segments" in whisper_result:
+            for seg in whisper_result["segments"]:
+                if "words" in seg:
+                    all_words.extend(seg["words"])
+    
+    for w in all_words:
+        # stable-ts object or dict access
+        if isinstance(w, dict):
+            word_text = w.get("word", "")
             start = w.get("start")
             end = w.get("end")
+        else:
+            word_text = w.word
+            start = w.start
+            end = w.end
             
-            # 単語の時間が取得できない場合は、セグメントの時間を使うなどの補完も考えられるが
-            # ここではNoneのままとして、後続処理でハンドリングする
-            
-            # 単語を文字に分解してリストに追加
-            # 時間は単語全体で均等割り...ではなく、単語全体で同じ時間を持つとする（簡易実装）
-            # または、文字数で割ることも可能だが、WhisperXの精度次第。
-            # ここでは「その文字が含まれる単語の開始・終了時間」を保持する。
-            for c in word_text:
-                chars.append({"char": c, "start": start, "end": end})
+        # 単語を文字に分解してリストに追加
+        # ここでは「その文字が含まれる単語の開始・終了時間」を保持する。
+        for c in word_text:
+            chars.append({"char": c, "start": start, "end": end})
 
     # 全テキストを結合してSudachiで解析
     full_text = "".join([c["char"] for c in chars])
@@ -473,7 +490,7 @@ def main():
     parser = argparse.ArgumentParser(description="Video to Subtitle/FCPXML Converter")
     parser.add_argument("video_file", help="Path to the input video file")
     parser.add_argument("--skip-transcribe", action="store_true", help="Skip transcription and use existing segments.json")
-    parser.add_argument("--skip-align", action="store_true", help="Skip alignment and use existing aligned.json")
+    # parser.add_argument("--skip-align", action="store_true", help="Skip alignment and use existing aligned.json") # Removed
     parser.add_argument("--skip-tokenize", action="store_true", help="Skip tokenization and use existing tokens.json")
     parser.add_argument("--import-srt", action="store_true", help="Skip all processing and import from an existing SRT file")
     parser.add_argument("--srt-path", help="Path to the SRT file to import (used with --import-srt). Defaults to outputs/<base>/<base>.srt")
@@ -489,7 +506,7 @@ def main():
     srt_path = os.path.join(outputs_dir, f"{base}.srt")
     fcpxml_path = os.path.join(outputs_dir, f"{base}.fcpxml")
     seg_json = os.path.join(outputs_dir, "segments.json")
-    aligned_json = os.path.join(outputs_dir, "aligned.json")
+    # aligned_json = os.path.join(outputs_dir, "aligned.json") # Removed
     token_json = os.path.join(outputs_dir, "tokens.json")
 
     # 動画情報取得
@@ -513,33 +530,31 @@ def main():
         if args.skip_transcribe and os.path.exists(seg_json):
             print("[2/5] Skipping transcription, loading segments.json...")
             with open(seg_json, "r", encoding="utf-8") as f:
-                segments = json.load(f)["segments"]
+                # When loading from JSON, it's a dict
+                result = json.load(f)
         else:
-            print("[2/5] Transcribing with WhisperX...")
-            result = transcribe_whisperx(audio_path)
-            segments = result["segments"]
-            with open(seg_json, "w", encoding="utf-8") as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
+            print("[2/5] Transcribing with Stable Whisper...")
+            result = transcribe_stable_whisper(audio_path)
+            # Save result
+            # stable-ts result object has .save_as_json or .to_dict
+            if hasattr(result, "save_as_json"):
+                result.save_as_json(seg_json)
+            else:
+                with open(seg_json, "w", encoding="utf-8") as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
         winsound.Beep(1000, 200)
 
-        if args.skip_align and os.path.exists(aligned_json):
-            print("[3/5] Skipping alignment, loading aligned.json...")
-            with open(aligned_json, "r", encoding="utf-8") as f:
-                aligned_result = json.load(f)
-        else:
-            print("[3/5] Aligning segments...")
-            aligned_result = align_segments(audio_path, segments)
-            with open(aligned_json, "w", encoding="utf-8") as f:
-                json.dump(aligned_result, f, ensure_ascii=False, indent=2)
-        winsound.Beep(1000, 200)
-
+        # Alignment step is removed as it's integrated in transcription
+        print("[3/5] Alignment step skipped (integrated in transcription)...")
+        
         if args.skip_tokenize and os.path.exists(token_json):
             print("[4/5] Skipping tokenization, loading tokens.json...")
             with open(token_json, "r", encoding="utf-8") as f:
                 tokens = json.load(f)
         else:
             print("[4/5] Tokenizing with Sudachi B-mode...")
-            tokens = tokenize_japanese(aligned_result["segments"], save_json=token_json)
+            # result can be a dict or a WhisperResult object
+            tokens = tokenize_japanese(result, save_json=token_json)
         winsound.Beep(1000, 200)
 
         print(f"[5/5] Formatting and writing SRT to {srt_path} ...")
